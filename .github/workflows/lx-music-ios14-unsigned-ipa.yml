@@ -1,4 +1,4 @@
-name: 生成 LX Music iOS 14 未签名 IPA
+name: 生成 LX Music iOS 14 未签名 IPA（修复本地导入）
 
 # 适用仓库：javaeryang/lx-music-mobile 的 ios-adaptation 分支（v1.9.1 / RN 0.73.11）
 # 用法：fork 该仓库 -> 把本文件放到 .github/workflows/ 下 -> Actions 手动 Run workflow
@@ -13,6 +13,18 @@ name: 生成 LX Music iOS 14 未签名 IPA
 #   3. 修掉 macOS 上不存在的 md5sum（改用 md5 -q）
 #   4. iOS runtime 准备失败降级为警告，不直接掐断 archive
 #   5. 构建产物名带 ios14 标识，便于和原版区分
+#
+#   6.【本次新增】修复「设置 - 自定义源管理 - 导入 - 本地导入」无反应：
+#      默认 useSystemFileSelector=true -> ChoosePath 调用 src/utils/fs.ts 的
+#      selectFile() -> iOS 上 AndroidScoped.openDocument 不存在 -> 直接 return null
+#      -> 调用方静默 return，界面什么都不弹。
+#      本 workflow 在构建时自动：给 package.json 加
+#      react-native-document-picker@9.1.0（iOS 11+，纯 ObjC）、替换 selectFile
+#      的 iOS 实现为系统文档选择器，并用 npm install 更新 lock（原 setup action
+#      的 npm ci 会因 lock 不一致而失败，故不再使用它）。
+#
+# 注意：本文件是「构建时注入」补丁，不改动你仓库里的源码文件；
+#       若想在仓库里正式提交修复，见随附的 lx-music-fs-fixed.ts 与说明。
 
 on:
   workflow_dispatch:
@@ -81,8 +93,31 @@ jobs:
           echo '--- pbxproj 部署目标 ---'
           grep -n 'IPHONEOS_DEPLOYMENT_TARGET' ios/LxMusicMobile.xcodeproj/project.pbxproj || true
 
-      - name: 安装 Node / Ruby 依赖（仓库内 composite action）
-        uses: ./.github/actions/setup
+      # 原仓库 ./.github/actions/setup 用的是 `npm ci`，会因新增依赖与
+      # package-lock.json 不一致而失败；这里改成「注入修复 + npm install」。
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: 缓存 npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: 注入「本地导入」文件选择器修复并安装依赖
+        run: |
+          set -euo pipefail
+          echo 'IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwojIC0qLSBjb2Rpbmc6IHV0Zi04IC0qLQoiIiIK5L+u5aSN44CM6K6+572uIC0g6Ieq5a6a5LmJ5rqQ566h55CGIC0g5a+85YWlIC0g5pys5Zyw5a+85YWl44CN54K55Ye75ZCO5LiN5by55Ye65paH5Lu26YCJ5oup5Zmo55qE6Zeu6aKY44CCCgrmoLnlm6DvvJrpu5jorqQgdXNlU3lzdGVtRmlsZVNlbGVjdG9yID0gdHJ1Ze+8jENob29zZVBhdGgg5Lya6LCD55SoIHNyYy91dGlscy9mcy50cyDnmoQKc2VsZWN0RmlsZSgp77yb6ICM6K+l5Ye95pWw55qEIGlPUyDliIbmlK/kvp3otZYgQW5kcm9pZCDkuJPlsZ7nmoQgQW5kcm9pZFNjb3BlZC5vcGVuRG9jdW1lbnQKKFNBRinvvIzlnKggaU9TIOS4iiBmc01vZHVsZSDkuLogbnVsbO+8jOebtOaOpSByZXR1cm4gbnVsbO+8jOiwg+eUqOaWuemdmem7mCByZXR1cm7vvIznlYzpnaLml6Dlj43lupTjgIIKCuS/ruWkje+8mgogIDEpIHBhY2thZ2UuanNvbiDlop7liqAgcmVhY3QtbmF0aXZlLWRvY3VtZW50LXBpY2tlckA5LjEuMO+8iGlPUyAxMSvvvIznuq8gT2JqQyBwb2TvvIwKICAgICDkuI4gUk4gMC43My4xMSAvIGlPUyAxNCDpg6jnvbLnm67moIflhbzlrrnvvIkKICAyKSBzcmMvdXRpbHMvZnMudHMg55qEIHNlbGVjdEZpbGUg5ZyoIGlPUyDkuIrmlLnnlKggVUlEb2N1bWVudFBpY2tlclZpZXdDb250cm9sbGVy77yMCiAgICAg5oqK6YCJ5Lit55qE5paH5Lu25aSN5Yi25Yiw5bqU55So57yT5a2Y55uu5b2V77yM6L+U5Zue5LiOIEFuZHJvaWQg5LiA6Ie055qEIHsgZGF0YTogPOi3r+W+hD4gfSDnu5PmnoTjgIIKIiIiCmltcG9ydCBqc29uCmltcG9ydCBwYXRobGliCmltcG9ydCBzeXMKCiMgLS0tLS0tLS0tLSAxKSBwYWNrYWdlLmpzb24gLS0tLS0tLS0tLQpwa2dfcGF0aCA9IHBhdGhsaWIuUGF0aCgncGFja2FnZS5qc29uJykKaWYgbm90IHBrZ19wYXRoLmV4aXN0cygpOgogICAgc3lzLmV4aXQoJ1tGQUlMXSDmib7kuI3liLAgcGFja2FnZS5qc29u77yM6K+35Zyo5LuT5bqT5qC555uu5b2V6L+Q6KGMJykKcGtnID0ganNvbi5sb2Fkcyhwa2dfcGF0aC5yZWFkX3RleHQoZW5jb2Rpbmc9J3V0Zi04JykpCmRlcHMgPSBwa2cuc2V0ZGVmYXVsdCgnZGVwZW5kZW5jaWVzJywge30pCmRlcHNbJ3JlYWN0LW5hdGl2ZS1kb2N1bWVudC1waWNrZXInXSA9ICc5LjEuMCcKcGtnX3BhdGgud3JpdGVfdGV4dChqc29uLmR1bXBzKHBrZywgaW5kZW50PTIsIGVuc3VyZV9hc2NpaT1GYWxzZSkgKyAnXG4nLCBlbmNvZGluZz0ndXRmLTgnKQpwcmludCgnWzEvMl0gcGFja2FnZS5qc29uIOW3suWKoOWFpSByZWFjdC1uYXRpdmUtZG9jdW1lbnQtcGlja2VyQDkuMS4wJykKCiMgLS0tLS0tLS0tLSAyKSBzcmMvdXRpbHMvZnMudHMgLS0tLS0tLS0tLQpmc19wYXRoID0gcGF0aGxpYi5QYXRoKCdzcmMvdXRpbHMvZnMudHMnKQppZiBub3QgZnNfcGF0aC5leGlzdHMoKToKICAgIHN5cy5leGl0KCdbRkFJTF0g5om+5LiN5YiwIHNyYy91dGlscy9mcy50cycpCnNyYyA9IGZzX3BhdGgucmVhZF90ZXh0KGVuY29kaW5nPSd1dGYtOCcpCgpvbGQgPSAiIiJleHBvcnQgY29uc3Qgc2VsZWN0RmlsZSA9IGFzeW5jKG9wdGlvbnM6IE9wZW5Eb2N1bWVudE9wdGlvbnMpID0+IHsKICBpZiAoIUFuZHJvaWRTY29wZWQ/Lm9wZW5Eb2N1bWVudCkgcmV0dXJuIG51bGwKICByZXR1cm4gQW5kcm9pZFNjb3BlZC5vcGVuRG9jdW1lbnQob3B0aW9ucykKfSIiIgoKbmV3ID0gciIiImV4cG9ydCBjb25zdCBzZWxlY3RGaWxlID0gYXN5bmMob3B0aW9uczogT3BlbkRvY3VtZW50T3B0aW9ucyk6IFByb21pc2U8RmlsZVR5cGUgfCBudWxsPiA9PiB7CiAgaWYgKGlzSU9TKSB7CiAgICAvLyBBbmRyb2lkIOeahCBBbmRyb2lkU2NvcGVkLm9wZW5Eb2N1bWVudCDln7rkuo4gU0FG77yM5ZyoIGlPUyDkuIrkuI3lrZjlnKjvvJsKICAgIC8vIOWOn+WunueOsOebtOaOpei/lOWbniBudWxs77yM5Lya6K6p44CM5pys5Zyw5a+85YWl44CN54K55Ye75ZCO5q+r5peg5Y+N5bqU44CCCiAgICAvLyDov5nph4zmlLnnlKjns7vnu5/mlofmoaPpgInmi6nlmaggVUlEb2N1bWVudFBpY2tlclZpZXdDb250cm9sbGVy77yMCiAgICAvLyDmiorpgInkuK3nmoTmlofku7blpI3liLbliLDlupTnlKjnvJPlrZjnm67lvZXvvIzov5Tlm57kuI4gQW5kcm9pZCDkuIDoh7TnmoQgeyBkYXRhOiA86Lev5b6EPiB944CCCiAgICBjb25zdCBkcE1vZHVsZSA9IHJlcXVpcmUoJ3JlYWN0LW5hdGl2ZS1kb2N1bWVudC1waWNrZXInKQogICAgY29uc3QgRG9jdW1lbnRQaWNrZXIgPSAoZHBNb2R1bGUuZGVmYXVsdCB8fCBkcE1vZHVsZSkgYXMgYW55CiAgICBsZXQgcmVzOiBhbnkKICAgIHRyeSB7CiAgICAgIHJlcyA9IGF3YWl0IERvY3VtZW50UGlja2VyLnBpY2tTaW5nbGUoewogICAgICAgIHR5cGU6IFtEb2N1bWVudFBpY2tlci50eXBlcy5hbGxGaWxlc10sCiAgICAgICAgY29weVRvOiAnY2FjaGVzRGlyZWN0b3J5JywKICAgICAgfSkKICAgIH0gY2F0Y2ggKGVycjogYW55KSB7CiAgICAgIGlmIChEb2N1bWVudFBpY2tlci5pc0NhbmNlbChlcnIpKSByZXR1cm4gbnVsbAogICAgICB0aHJvdyBlcnIKICAgIH0KICAgIGNvbnN0IHVyaTogc3RyaW5nID0gcmVzLmZpbGVDb3B5VXJpIHx8IHJlcy51cmkKICAgIGxldCBzb3VyY2VQYXRoID0gdXJpLnJlcGxhY2UoL15maWxlOlwvXC8vLCAnJykKICAgIHRyeSB7IHNvdXJjZVBhdGggPSBkZWNvZGVVUklDb21wb25lbnQoc291cmNlUGF0aCkgfSBjYXRjaCB7IC8qIOaWh+S7tuWQjeWQq+mdnuazlSAlIOaXtuS/neaMgeWOn+i3r+W+hCAqLyB9CiAgICBjb25zdCBhbGxvd2VkID0gKG9wdGlvbnMgYXMgYW55KS5leHRUeXBlcyBhcyBzdHJpbmdbXSB8IHVuZGVmaW5lZAogICAgY29uc3QgZXh0ID0gZXh0bmFtZShyZXMubmFtZSB8fCBzb3VyY2VQYXRoKSB8fCAoYWxsb3dlZCAmJiBhbGxvd2VkWzBdKSB8fCAnanMnCiAgICBjb25zdCBiYXNlUGF0aCA9IG9wdGlvbnMudG9QYXRoIHx8IGAke3RlbXBvcmFyeURpcmVjdG9yeVBhdGh9L3RlbXBGaWxlYAogICAgY29uc3QgdGFyZ2V0UGF0aCA9IGAke2Jhc2VQYXRofS4ke2V4dH1gCiAgICBpZiAoYXdhaXQgUk5GUy5leGlzdHModGFyZ2V0UGF0aCkpIGF3YWl0IFJORlMudW5saW5rKHRhcmdldFBhdGgpCiAgICBhd2FpdCBSTkZTLmNvcHlGaWxlKHNvdXJjZVBhdGgsIHRhcmdldFBhdGgpCiAgICByZXR1cm4geyBkYXRhOiB0YXJnZXRQYXRoIH0gYXMgdW5rbm93biBhcyBGaWxlVHlwZQogIH0KICBpZiAoIUFuZHJvaWRTY29wZWQ/Lm9wZW5Eb2N1bWVudCkgcmV0dXJuIG51bGwKICByZXR1cm4gQW5kcm9pZFNjb3BlZC5vcGVuRG9jdW1lbnQob3B0aW9ucykKfSIiIgoKaWYgb2xkIG5vdCBpbiBzcmM6CiAgICBzeXMuZXhpdCgnW0ZBSUxdIOacquWcqCBzcmMvdXRpbHMvZnMudHMg5om+5Yiw6aKE5pyf55qEIHNlbGVjdEZpbGUg5a6e546w77yI5LuT5bqT54mI5pys5Y+v6IO95bey5Y+Y5YyW77yJ77yM6K+35oqKIEFjdGlvbnMg5pel5b+X5Y+R5ZueJykKaWYgJ3JlYWN0LW5hdGl2ZS1kb2N1bWVudC1waWNrZXInIGluIHNyYzoKICAgIHN5cy5leGl0KCdbRkFJTF0gc3JjL3V0aWxzL2ZzLnRzIOeci+i1t+adpeW3sue7j+aJk+i/h+ihpeS4ge+8jOi3s+i/h+S7peWFjemHjeWkjeS/ruaUuScpCnNyYyA9IHNyYy5yZXBsYWNlKG9sZCwgbmV3LCAxKQpmc19wYXRoLndyaXRlX3RleHQoc3JjLCBlbmNvZGluZz0ndXRmLTgnKQpwcmludCgnWzIvMl0gc3JjL3V0aWxzL2ZzLnRzIOeahCBzZWxlY3RGaWxlIOW3suabv+aNouS4uiBpT1Mg57O757uf5paH5Lu26YCJ5oup5Zmo5a6e546wJykK' | python3 -c "import base64,sys;sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))" > /tmp/ios_picker_patch.py
+          python3 /tmp/ios_picker_patch.py
+          npm install --no-audit --no-fund
+          test -d node_modules/react-native-document-picker
+          grep -q 'UIDocumentPickerViewController' src/utils/fs.ts
+          echo '--- 文档选择器依赖版本 ---'
+          node -p "require('./node_modules/react-native-document-picker/package.json').version"
 
       - name: 读取版本号
         run: echo "PACKAGE_VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
@@ -102,6 +137,11 @@ jobs:
           bundle config set --local path vendor/bundle
           bundle install
           bundle exec pod install --project-directory=ios
+          echo '--- 确认文档选择器 pod 已被 autolink ---'
+          grep -i 'react-native-document-picker' ios/Podfile.lock || {
+            echo '::error::react-native-document-picker 未被 CocoaPods 链接，本地导入仍会失效'
+            exit 1
+          }
 
       - name: 编译未签名 App
         run: |
