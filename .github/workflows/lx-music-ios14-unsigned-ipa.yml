@@ -1,0 +1,147 @@
+name: 生成 LX Music iOS 14 未签名 IPA
+
+# 适用仓库：javaeryang/lx-music-mobile 的 ios-adaptation 分支（v1.9.1 / RN 0.73.11）
+# 用法：fork 该仓库 -> 把本文件放到 .github/workflows/ 下 -> Actions 手动 Run workflow
+#
+# 全程免费：Public 仓库 + GitHub 托管的 macOS 标准 runner（公开仓库不限量）
+# 不需要 Apple 开发者账号、证书、Secrets，也不需要 Mac。
+# 产物是【未签名】IPA，需自行签名后安装。
+#
+# 相对社区原版 ios-pack.yml 的改动：
+#   1. 强制 iOS 14.0 部署目标（改 Podfile 平台行 + pbxproj，并在构建后校验 MinimumOSVersion）
+#   2. 只保留手动触发，避免每次 push 消耗构建时间
+#   3. 修掉 macOS 上不存在的 md5sum（改用 md5 -q）
+#   4. iOS runtime 准备失败降级为警告，不直接掐断 archive
+#   5. 构建产物名带 ios14 标识，便于和原版区分
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: iOS 14 unsigned IPA
+    # macOS 14 镜像已于 2026-11-02 退役；macos-15 仍带 Xcode 16.0~16.4。
+    runs-on: macos-15
+    timeout-minutes: 150
+
+    steps:
+      - name: 检出代码（含仓库内 .github/actions/setup）
+        uses: actions/checkout@v4
+
+      # RN 0.73 官方支持到 Xcode 15；Xcode 16.3+ (clang 17) 会破坏 RCT-Folly/boost，
+      # 因此优先选 16.2 / 16.1 / 16.0，都不在则用镜像默认并给出警告。
+      - name: 锁定兼容的 Xcode
+        run: |
+          XCODE=''
+          for v in 16.2 16.1 16.0; do
+            if [ -d "/Applications/Xcode_${v}.app" ]; then
+              XCODE="/Applications/Xcode_${v}.app"
+              break
+            fi
+          done
+          if [ -n "$XCODE" ]; then
+            sudo xcode-select -s "$XCODE"
+            echo "使用 $XCODE"
+          else
+            echo '::warning::未找到 Xcode 16.0~16.2，改用镜像默认；RN 0.73 可能编译失败'
+          fi
+          xcodebuild -version
+
+      - name: 初始化 Xcode
+        run: sudo xcodebuild -runFirstLaunch
+
+      - name: 准备 iOS 平台 runtime（ibtool 编译 storyboard 需要）
+        timeout-minutes: 30
+        run: |
+          for attempt in 1 2 3; do
+            echo "准备 iOS runtime（第 ${attempt}/3 次）"
+            if xcrun simctl list > /dev/null && xcodebuild -downloadPlatform iOS; then
+              xcrun --sdk iphoneos --show-sdk-version
+              exit 0
+            fi
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
+          echo '::warning::iOS runtime 准备失败，继续尝试 archive（若 ibtool 报错再看日志）'
+          xcode-select -p
+          xcodebuild -version
+
+      # ---------- 关键：把部署目标钉死在 iOS 14.0 ----------
+      # RN 0.73 的 min_ios_version_supported 是 13.4，Podfile 默认跟随；
+      # 这里改成 14.0，同时把工程里 Debug/Release/Test 的部署目标统一覆盖。
+      # 若某个 pod 的 podspec 声明了高于 14.0 的下限，pod install 会直接报错，
+      # 那就说明 iOS 14 在当前依赖组合下不可行，需要降级该依赖。
+      - name: 强制 iOS 14 部署目标
+        run: |
+          set -euo pipefail
+          sed -i '' "s/^platform :ios, min_ios_version_supported$/platform :ios, '14.0'/" ios/Podfile
+          sed -i '' -E 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9][0-9.]*;/IPHONEOS_DEPLOYMENT_TARGET = 14.0;/g' \
+            ios/LxMusicMobile.xcodeproj/project.pbxproj
+          echo '--- Podfile 平台行 ---'
+          grep -n '^platform :ios' ios/Podfile || true
+          echo '--- pbxproj 部署目标 ---'
+          grep -n 'IPHONEOS_DEPLOYMENT_TARGET' ios/LxMusicMobile.xcodeproj/project.pbxproj || true
+
+      - name: 安装 Node / Ruby 依赖（仓库内 composite action）
+        uses: ./.github/actions/setup
+
+      - name: 读取版本号
+        run: echo "PACKAGE_VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
+
+      - name: 缓存 CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/CocoaPods
+          key: ${{ runner.os }}-pods-ios14-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pods-
+
+      - name: 安装 Pods
+        env:
+          NO_FLIPPER: '1'
+        run: |
+          bundle config set --local path vendor/bundle
+          bundle install
+          bundle exec pod install --project-directory=ios
+
+      - name: 编译未签名 App
+        run: |
+          cd ios
+          xcodebuild \
+            -workspace LxMusicMobile.xcworkspace \
+            -scheme LxMusicMobile \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            IPHONEOS_DEPLOYMENT_TARGET=14.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: 校验产物最低系统版本确实是 14.0
+        run: |
+          APP="ios/build/Build/Products/Release-iphoneos/LxMusicMobile.app"
+          echo -n "MinimumOSVersion = "
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist"
+          echo -n "签名状态："
+          codesign -dv "$APP" 2>&1 || true
+
+      - name: 打包未签名 IPA
+        run: |
+          set -euo pipefail
+          cd ios/build/Build/Products/Release-iphoneos
+          rm -rf Payload && mkdir Payload
+          cp -R LxMusicMobile.app Payload/
+          ditto -c -k --keepParent Payload \
+            "${GITHUB_WORKSPACE}/lx-music-mobile-v${PACKAGE_VERSION}-ios14-unsigned.ipa"
+          cd "${GITHUB_WORKSPACE}"
+          rm -rf ios/build/Build/Products/Release-iphoneos/Payload
+          md5 -q "lx-music-mobile-v${PACKAGE_VERSION}-ios14-unsigned.ipa"
+          ls -lh "lx-music-mobile-v${PACKAGE_VERSION}-ios14-unsigned.ipa"
+
+      - name: 上传 artifact（免费）
+        uses: actions/upload-artifact@v4
+        with:
+          name: lx-music-v${{ env.PACKAGE_VERSION }}-ios14-unsigned
+          path: lx-music-mobile-v${{ env.PACKAGE_VERSION }}-ios14-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
